@@ -1,0 +1,13 @@
+---
+
+- model_id: "prout"
+  data_file: "prout.ase.json"
+  anchor_point:
+    x: 0
+    y: 12
+
+# - model_id: "skeleton"
+#   data_file: "skeleton.ase.json"
+#   anchor_point:
+#     x: 0
+#     y: 12
