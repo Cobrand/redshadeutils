@@ -1,7 +1,6 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize};
 use anyhow::{Result, Context, anyhow};
 use std::fs::File;
-use std::io::prelude::*;
 use std::path::PathBuf;
 
 mod aseprite;
@@ -26,8 +25,31 @@ struct IndexEntry {
     anchor_point: Point,
 }
 
-fn gen_wl_model(ase_data: AsepriteDataFile, model_id: String, anchor_point: Point) -> WLModel {
-    WLModel {
+fn gen_wl_model(ase_data: AsepriteDataFile, model_id: String, anchor_point: Point) -> Result<WLModel> {
+    let animations = ase_data.meta.tags.into_iter()
+        .filter_map(|tag| tag.name.strip_prefix("a_")
+            .map(|s| s.to_string())
+            .map(|s| (s, tag)) // 2 maps to make borrow checker happy
+        )
+        .map(|(anim_id, tag)| WLAnimation {
+            animation_id: anim_id,
+            frames: (tag.from..=tag.to).collect(),
+        })
+        .collect::<Vec<_>>();
+    
+    let animations = if animations.is_empty() {
+        if ase_data.frames.len() > 1 {
+            return Err(anyhow!("model_id {} has {} frames but 0 animations, can't use default idle with 1 frame", model_id, ase_data.frames.len()))
+        }
+        vec![WLAnimation {
+            animation_id: String::from("idle"),
+            frames: vec![0]
+        }]
+    } else {
+        animations
+    };
+
+    Ok(WLModel {
         anchor_point: WLPoint { x: anchor_point.x, y: anchor_point.y },
         model_id,
         frames: ase_data.frames.into_iter().map(|frame| WLFrame {
@@ -39,17 +61,8 @@ fn gen_wl_model(ase_data: AsepriteDataFile, model_id: String, anchor_point: Poin
                 h: frame.rect.h,
             }
         }).collect::<Vec<_>>(),
-        animations: ase_data.meta.tags.into_iter()
-            .filter_map(|tag| tag.name.strip_prefix("a_")
-                .map(|s| s.to_string())
-                .map(|s| (s, tag)) // 2 maps to make borrow checker happy
-            )
-            .map(|(anim_id, tag)| WLAnimation {
-                animation_id: anim_id,
-                frames: (tag.from..=tag.to).collect(),
-            })
-            .collect::<Vec<_>>()
-    }
+        animations,
+    })
 }
 
 fn write_zip(zip_file: &mut File, image_paths: &[PathBuf], atlas_content: &wl_atlas::WLAtlas) -> Result<()> {
@@ -60,13 +73,17 @@ fn write_zip(zip_file: &mut File, image_paths: &[PathBuf], atlas_content: &wl_at
 
     for (model, image_path) in atlas_content.models.iter().zip(image_paths.iter()) {
         if model.animations.len() == 0 {
-            return Err(anyhow!("model_id \"{}\" has a data file but 0 animations", model.model_id));
+            if model.frames.len() > 1 {
+                // if frames = 1 and animations = 0, the only frame will be idle
+                return Err(anyhow!("model_id \"{}\" has a data file with {} frames but 0 animations", model.model_id, model.frames.len()));
+            }
+            println!("Packing model_id={} with one default \"idle\" animation", model.model_id);
+        } else {
+            let animations = model.animations.iter()
+                .map(|a| a.animation_id.clone())
+                .collect::<Vec<_>>();
+            println!("Packing model_id={} with {} animations: {}", model.model_id, animations.len(), animations.join(", "));
         }
-        let animations = model.animations.iter()
-            .map(|a| a.animation_id.clone())
-            .collect::<Vec<_>>();
-        println!("Packing model_id={} with {} animations: {}", model.model_id, animations.len(), animations.join(", "));
-
         zip_writer.start_file(format!("{}.png", model.model_id), Default::default())?;
         let mut image_file = File::open(image_path)
             .with_context(|| format!("failed to open image file at {}", image_path.display()))?;
@@ -117,7 +134,7 @@ fn main() -> Result<()> {
         image_path.push(&aseprite_data.meta.image_path);
 
         image_paths.push(image_path);
-        let wl_model = gen_wl_model(aseprite_data, index_entry.model_id, index_entry.anchor_point);
+        let wl_model = gen_wl_model(aseprite_data, index_entry.model_id, index_entry.anchor_point)?;
         wl_models.push(wl_model);
     }
 
