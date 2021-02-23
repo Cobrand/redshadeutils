@@ -19,13 +19,47 @@ struct Point {
 }
 
 #[derive(Debug, Deserialize)]
-struct IndexEntry {
-    model_id: String,
-    data_file: String,
-    anchor_point: Point,
+#[serde(untagged)]
+enum IndexEntry {
+    Pixel {
+        model_id: String,
+        data_file: String,
+        anchor_point: Point,
+    },
+    Graphic {
+        model_id: String,
+        image_file: String,
+    },
 }
 
-fn gen_wl_model(ase_data: AsepriteDataFile, model_id: String, anchor_point: Point) -> Result<WLModel> {
+fn gen_wl_model_from_png(model_id: String, image_path: &PathBuf) -> Result<WLModel> {
+    let png_decoder = png::Decoder::new(File::open(image_path)
+        .with_context(|| format!("failed to open png file at {}", image_path.display()))?
+    );
+
+    let (info, _) = png_decoder.read_info()
+        .with_context(|| format!("faield to decode png file at {}", image_path.display()))?;
+
+    Ok(WLModel {
+        anchor_point: WLPoint { x: 0, y: 0},
+        model_id,
+        frames: vec![ WLFrame {
+            duration: 1000,
+            rect: WLRect {
+                x: 0,
+                y: 0,
+                w: info.width as i32,
+                h: info.height as i32,
+            }
+        }],
+        animations: vec![WLAnimation {
+            animation_id: String::from("idle"),
+            frames: vec![0]
+        }],
+    })
+}
+
+fn gen_wl_model_from_ase_data(ase_data: AsepriteDataFile, model_id: String, anchor_point: Point) -> Result<WLModel> {
     let animations = ase_data.meta.tags.into_iter()
         .filter_map(|tag| tag.name.strip_prefix("a_")
             .map(|s| s.to_string())
@@ -119,22 +153,35 @@ fn main() -> Result<()> {
 
     println!("Packing {} models in {}", parsed_index_file.0.iter().count(), output_zip_file_path);
     for index_entry in parsed_index_file.0.into_iter() {
-        let mut json_data_path = PathBuf::from(index_file_path);
-        json_data_path.pop();
-        json_data_path.push(&index_entry.data_file);
+        let wl_model = match index_entry {
+            IndexEntry::Pixel { model_id, data_file, anchor_point } => {
+                let mut json_data_path = PathBuf::from(index_file_path);
+                json_data_path.pop();
+                json_data_path.push(&data_file);
 
-        let json_file = File::open(&json_data_path)
-            .with_context(|| format!("failed to read json file at {}", json_data_path.display()))?;
+                let json_file = File::open(&json_data_path)
+                    .with_context(|| format!("failed to read json file at {}", json_data_path.display()))?;
 
-        let aseprite_data: AsepriteDataFile = serde_json::from_reader(&json_file)
-            .with_context(|| format!("failed to read json file at {}", json_data_path.display()))?;
+                let aseprite_data: AsepriteDataFile = serde_json::from_reader(&json_file)
+                    .with_context(|| format!("failed to read json file at {}", json_data_path.display()))?;
 
-        let mut image_path = json_data_path;
-        image_path.pop();
-        image_path.push(&aseprite_data.meta.image_path);
+                let mut image_path = json_data_path;
+                image_path.pop();
+                image_path.push(&aseprite_data.meta.image_path);
 
-        image_paths.push(image_path);
-        let wl_model = gen_wl_model(aseprite_data, index_entry.model_id, index_entry.anchor_point)?;
+                image_paths.push(image_path);
+                gen_wl_model_from_ase_data(aseprite_data, model_id, anchor_point)?
+            },
+            IndexEntry::Graphic { model_id, image_file } => {
+                let mut image_path = PathBuf::from(index_file_path);
+                image_path.pop();
+                image_path.push(&image_file);
+                
+                let model = gen_wl_model_from_png(model_id, &image_path)?;
+                image_paths.push(image_path);
+                model
+            }
+        };
         wl_models.push(wl_model);
     }
 
